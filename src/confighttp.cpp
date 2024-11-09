@@ -142,8 +142,13 @@ namespace confighttp {
     return true;
   }
 
+  /**
+   * @brief Send a 404 Not Found response.
+   * @param response The original response object.
+   * @param request The original request object.
+   */
   void
-  not_found(resp_https_t response, req_https_t request) {
+  not_found(resp_https_t response, [[maybe_unused]] req_https_t request) {
     pt::ptree tree;
     tree.put("root.<xmlattr>.status_code", 404);
 
@@ -154,6 +159,27 @@ namespace confighttp {
 
     *response << "HTTP/1.1 404 NOT FOUND\r\n"
               << data.str();
+  }
+
+  /**
+   * @brief Send a 400 Bad Request response.
+   * @param response The original response object.
+   * @param request The original request object.
+   * @param error_message The error message to include in the response.
+   */
+  void
+  bad_request(resp_https_t response, [[maybe_unused]] req_https_t request, const std::string &error_message) {
+    pt::ptree tree;
+    tree.put("root.<xmlattr>.status_code", 400);
+    tree.put("root.error", error_message);
+
+    std::ostringstream data;
+    pt::write_xml(data, tree);
+
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Content-Type", "application/xml");
+
+    response->write(SimpleWeb::StatusCode::client_error_bad_request, data.str(), headers);
   }
 
   /**
@@ -360,7 +386,7 @@ namespace confighttp {
   }
 
   /**
-   * @brief Save an application. If the application already exists, it will be updated, otherwise it will be added.
+   * @brief Save an application. To save a new application the index must be `-1`. To update an existing application, you must provide the current index of the application.
    * @param response The HTTP response object.
    * @param request The HTTP request object.
    * The body for the post request should be JSON serialized in the following format:
@@ -385,7 +411,7 @@ namespace confighttp {
    *   "detached": [
    *     "Detached command"
    *   ],
-   *   "image-path": "Full path to the application image. Must be a png file.",
+   *   "image-path": "Full path to the application image. Must be a png file."
    * }
    * @endcode
    */
@@ -468,8 +494,7 @@ namespace confighttp {
     catch (std::exception &e) {
       BOOST_LOG(warning) << "SaveApp: "sv << e.what();
 
-      outputTree.put("status", "false");
-      outputTree.put("error", "Invalid Input JSON");
+      bad_request(response, request, "Invalid Input JSON");
       return;
     }
 
@@ -502,8 +527,7 @@ namespace confighttp {
       int index = stoi(request->path_match[1]);
 
       if (index < 0) {
-        outputTree.put("status", "false");
-        outputTree.put("error", "Invalid Index");
+        bad_request(response, request, "Invalid Index");
         return;
       }
       else {
@@ -522,8 +546,7 @@ namespace confighttp {
     }
     catch (std::exception &e) {
       BOOST_LOG(warning) << "DeleteApp: "sv << e.what();
-      outputTree.put("status", "false");
-      outputTree.put("error", "Invalid File JSON");
+      bad_request(response, request, "Invalid File JSON");
       return;
     }
 
@@ -539,7 +562,7 @@ namespace confighttp {
    * @code{.json}
    * {
    *   "key": "igdb_<game_id>",
-   *   "url": "https://images.igdb.com/igdb/image/upload/t_cover_big_2x/<slug>.png",
+   *   "url": "https://images.igdb.com/igdb/image/upload/t_cover_big_2x/<slug>.png"
    * }
    * @endcode
    */
@@ -568,8 +591,7 @@ namespace confighttp {
     }
     catch (std::exception &e) {
       BOOST_LOG(warning) << "UploadCover: "sv << e.what();
-      outputTree.put("status", "false");
-      outputTree.put("error", e.what());
+      bad_request(response, request, e.what());
       return;
     }
 
@@ -699,8 +721,7 @@ namespace confighttp {
     }
     catch (std::exception &e) {
       BOOST_LOG(warning) << "SaveConfig: "sv << e.what();
-      outputTree.put("status", "false");
-      outputTree.put("error", e.what());
+      bad_request(response, request, e.what());
       return;
     }
   }
@@ -757,6 +778,7 @@ namespace confighttp {
 
     print_req(request);
 
+    std::vector<std::string> errors = {};
     std::stringstream ss;
     std::stringstream configStream;
     ss << request->content.rdbuf();
@@ -779,15 +801,13 @@ namespace confighttp {
       auto confirmPassword = inputTree.count("confirmNewPassword") > 0 ? inputTree.get<std::string>("confirmNewPassword") : "";
       if (newUsername.length() == 0) newUsername = username;
       if (newUsername.length() == 0) {
-        outputTree.put("status", false);
-        outputTree.put("error", "Invalid Username");
+        errors.emplace_back("Invalid Username");
       }
       else {
         auto hash = util::hex(crypto::hash(password + config::sunshine.salt)).to_string();
         if (config::sunshine.username.empty() || (boost::iequals(username, config::sunshine.username) && hash == config::sunshine.password)) {
           if (newPassword.empty() || newPassword != confirmPassword) {
-            outputTree.put("status", false);
-            outputTree.put("error", "Password Mismatch");
+            errors.emplace_back("Password Mismatch");
           }
           else {
             http::save_user_creds(config::sunshine.credentials_file, newUsername, newPassword);
@@ -796,15 +816,22 @@ namespace confighttp {
           }
         }
         else {
-          outputTree.put("status", false);
-          outputTree.put("error", "Invalid Current Credentials");
+          errors.emplace_back("Invalid Current Credentials");
         }
+      }
+
+      if (!errors.empty()) {
+        // join the errors array
+        std::string error = std::accumulate(errors.begin(), errors.end(), std::string(),
+          [](const std::string &a, const std::string &b) {
+            return a.empty() ? b : a + ", " + b;
+          });
+        bad_request(response, request, error);
       }
     }
     catch (std::exception &e) {
       BOOST_LOG(warning) << "SavePassword: "sv << e.what();
-      outputTree.put("status", false);
-      outputTree.put("error", e.what());
+      bad_request(response, request, e.what());
       return;
     }
   }
@@ -847,8 +874,7 @@ namespace confighttp {
     }
     catch (std::exception &e) {
       BOOST_LOG(warning) << "SavePin: "sv << e.what();
-      outputTree.put("status", false);
-      outputTree.put("error", e.what());
+      bad_request(response, request, e.what());
       return;
     }
   }
@@ -912,8 +938,7 @@ namespace confighttp {
     }
     catch (std::exception &e) {
       BOOST_LOG(warning) << "Unpair: "sv << e.what();
-      outputTree.put("status", false);
-      outputTree.put("error", e.what());
+      bad_request(response, request, e.what());
       return;
     }
   }
